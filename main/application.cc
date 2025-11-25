@@ -18,6 +18,11 @@
 #include <font_awesome.h>
 
 #define TAG "Application"
+#define START_TAG "atart"
+
+// 定义新的宏
+#define MY_LOGI(tag, fmt, ...) \
+    ESP_LOGI(tag, "[%s:%d] " fmt, __FUNCTION__, __LINE__, ##__VA_ARGS__)
 
 
 static const char* const STATE_STRINGS[] = {
@@ -51,7 +56,7 @@ Application::Application() {
     esp_timer_create_args_t clock_timer_args = {
         .callback = [](void* arg) {
             Application* app = (Application*)arg;
-            xEventGroupSetBits(app->event_group_, MAIN_EVENT_CLOCK_TICK);
+            xEventGroupSetBits(app->event_group_, MAIN_EVENT_CLOCK_TICK); //用来通知等待事件的任务：一般和xEventGroupWaitBits()搭配
         },
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
@@ -345,6 +350,25 @@ void Application::StopListening() {
     });
 }
 
+/**
+ * @brief 启动应用程序的主要初始化流程。
+ *
+ * 此函数负责启动整个设备应用系统，包括硬件初始化、音频服务配置、网络连接建立、协议选择与绑定等操作。
+ * 它还会根据服务器下发的消息类型处理各种事件（如语音识别结果、文本转语音状态变化、系统命令等），
+ * 并更新显示界面的状态信息。最后播放提示音表示设备已准备就绪。
+ *
+ * 主要步骤如下：
+ * - 初始化并启动显示模块；
+ * - 配置音频编解码器及回调接口；
+ * - 创建主事件循环任务；
+ * - 启动定时器用于刷新状态栏；
+ * - 等待网络连接完成；
+ * - 检查资源版本和固件升级；
+ * - 根据OTA配置决定使用MQTT或WebSocket协议；
+ * - 绑定协议相关的各类回调函数；
+ * - 启动通信协议；
+ * - 更新UI状态并播放成功提示音。
+ */
 void Application::Start() {
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
@@ -352,7 +376,7 @@ void Application::Start() {
     /* Setup the display */
     auto display = board.GetDisplay();
 
-    // Print board name/version info
+    // 打印板卡名称/版本信息到聊天区域
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 
     /* Setup the audio service */
@@ -360,19 +384,23 @@ void Application::Start() {
     audio_service_.Initialize(codec);
     audio_service_.Start();
 
+    // 设置音频服务相关回调函数
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
+        MY_LOGI(START_TAG, "Send queue available");
         xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
     };
     callbacks.on_wake_word_detected = [this](const std::string& wake_word) {
+        MY_LOGI(START_TAG, "Wake word detected: %s", wake_word.c_str());
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
     callbacks.on_vad_change = [this](bool speaking) {
+        MY_LOGI(START_TAG, "VAD change: %d", speaking);
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
     audio_service_.SetCallbacks(callbacks);
 
-    // Start the main event loop task with priority 3
+    // 启动主事件循环线程，优先级为3
     xTaskCreate([](void* arg) {
         ((Application*)arg)->MainEventLoop();
         vTaskDelete(NULL);
@@ -384,24 +412,25 @@ void Application::Start() {
     /* Wait for the network to be ready */
     board.StartNetwork();
 
-    // Update the status bar immediately to show the network state
+    // 强制立即更新一次状态栏以反映当前网络状态
     display->UpdateStatusBar(true);
 
-    // Check for new assets version
+    // 检查是否有新的资源文件需要下载
     CheckAssetsVersion();
 
-    // Check for new firmware version or get the MQTT broker address
+    // 检查是否有新固件版本或获取MQTT地址
     Ota ota;
     CheckNewVersion(ota);
 
-    // Initialize the protocol
+    // 显示加载协议中的状态
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
-    // Add MCP common tools before initializing the protocol
+    // 添加通用工具至MCP服务器
     auto& mcp_server = McpServer::GetInstance();
     mcp_server.AddCommonTools();
     mcp_server.AddUserOnlyTools();
 
+    // 根据OTA配置选择合适的通信协议，默认使用MQTT
     if (ota.HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota.HasWebsocketConfig()) {
@@ -411,19 +440,27 @@ void Application::Start() {
         protocol_ = std::make_unique<MqttProtocol>();
     }
 
+    // 注册协议连接成功的回调
     protocol_->OnConnected([this]() {
         DismissAlert();
     });
 
+    // 注册网络错误时的回调
     protocol_->OnNetworkError([this](const std::string& message) {
+        MY_LOGI(TAG, "Network error: %s", message.c_str());
         last_error_message_ = message;
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
+
+    // 处理接收到的音频数据包
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+        MY_LOGI(START_TAG, "Incoming audio packet");
         if (device_state_ == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
+
+    // 当音频通道打开时禁用省电模式，并检查采样率是否匹配
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
         board.SetPowerSaveMode(false);
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
@@ -431,7 +468,10 @@ void Application::Start() {
                 protocol_->server_sample_rate(), codec->output_sample_rate());
         }
     });
+
+    // 当音频通道关闭后启用省电模式，并重置状态
     protocol_->OnAudioChannelClosed([this, &board]() {
+        MY_LOGI(TAG, "Audio channel closed");
         board.SetPowerSaveMode(true);
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
@@ -439,10 +479,18 @@ void Application::Start() {
             SetDeviceState(kDeviceStateIdle);
         });
     });
+
+    // 解析从服务器接收的JSON消息并分发处理逻辑
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
-        // Parse JSON data
+        // char* jsonStr = cJSON_Print(root);
+        // ESP_LOGI(START_TAG, "Incoming JSON: %s", jsonStr);
+        // free(jsonStr); // cJSON_Print 会分配内存，要释放
+
+        // 获取消息类型字段
         auto type = cJSON_GetObjectItem(root, "type");
+
         if (strcmp(type->valuestring, "tts") == 0) {
+            // TTS消息：控制说话状态切换
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
@@ -471,6 +519,7 @@ void Application::Start() {
                 }
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
+            // STT消息：将用户语音识别结果显示在屏幕上
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
@@ -479,6 +528,7 @@ void Application::Start() {
                 });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
+            // LLM情感反馈设置
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
                 Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
@@ -486,16 +536,18 @@ void Application::Start() {
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
+            // MCP消息解析
             auto payload = cJSON_GetObjectItem(root, "payload");
             if (cJSON_IsObject(payload)) {
                 McpServer::GetInstance().ParseMessage(payload);
             }
         } else if (strcmp(type->valuestring, "system") == 0) {
+            // 系统指令处理
             auto command = cJSON_GetObjectItem(root, "command");
             if (cJSON_IsString(command)) {
                 ESP_LOGI(TAG, "System command: %s", command->valuestring);
                 if (strcmp(command->valuestring, "reboot") == 0) {
-                    // Do a reboot if user requests a OTA update
+                    // 请求重启设备
                     Schedule([this]() {
                         Reboot();
                     });
@@ -504,6 +556,7 @@ void Application::Start() {
                 }
             }
         } else if (strcmp(type->valuestring, "alert") == 0) {
+            // 警告通知展示
             auto status = cJSON_GetObjectItem(root, "status");
             auto message = cJSON_GetObjectItem(root, "message");
             auto emotion = cJSON_GetObjectItem(root, "emotion");
@@ -514,6 +567,7 @@ void Application::Start() {
             }
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
         } else if (strcmp(type->valuestring, "custom") == 0) {
+            // 自定义消息处理（可选功能）
             auto payload = cJSON_GetObjectItem(root, "payload");
             ESP_LOGI(TAG, "Received custom message: %s", cJSON_PrintUnformatted(root));
             if (cJSON_IsObject(payload)) {
@@ -528,8 +582,11 @@ void Application::Start() {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
     });
+
+    // 启动选定的通信协议
     bool protocol_started = protocol_->Start();
 
+    // 输出堆内存统计信息
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
 
@@ -538,7 +595,7 @@ void Application::Start() {
         std::string message = std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
         display->ShowNotification(message.c_str());
         display->SetChatMessage("system", "");
-        // Play the success sound to indicate the device is ready
+        // 播放成功声音提示设备就绪
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
     }
 }
@@ -552,11 +609,19 @@ void Application::Schedule(std::function<void()> callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
-// The Main Event Loop controls the chat state and websocket connection
-// If other tasks need to access the websocket or chat state,
-// they should use Schedule to call this function
+
+/**
+ * @brief 应用程序主事件循环函数
+ * 
+ * 此函数是应用程序的核心事件处理循环，负责监听并响应各种系统事件。
+ * 它使用 FreeRTOS 的事件组机制等待多个事件的发生，并根据发生的事件执行相应的操作。
+ * 支持的事件包括：任务调度、音频发送、唤醒词检测、VAD状态变化、时钟滴答和错误处理等。
+ * 
+ * 该函数会持续运行，直到系统被关闭或发生不可恢复的错误。
+ */
 void Application::MainEventLoop() {
     while (true) {
+        // 等待任意一个主事件的发生，包括任务调度、音频发送、唤醒词检测、VAD变化、时钟滴答或错误事件
         auto bits = xEventGroupWaitBits(event_group_, MAIN_EVENT_SCHEDULE |
             MAIN_EVENT_SEND_AUDIO |
             MAIN_EVENT_WAKE_WORD_DETECTED |
@@ -564,11 +629,13 @@ void Application::MainEventLoop() {
             MAIN_EVENT_CLOCK_TICK |
             MAIN_EVENT_ERROR, pdTRUE, pdFALSE, portMAX_DELAY);
 
+        // 处理错误事件：设置设备为空闲状态，并显示错误提示信息
         if (bits & MAIN_EVENT_ERROR) {
             SetDeviceState(kDeviceStateIdle);
             Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         }
 
+        // 处理音频发送事件：从音频服务队列中取出数据包并通过协议发送出去
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
@@ -577,10 +644,12 @@ void Application::MainEventLoop() {
             }
         }
 
+        // 处理唤醒词检测事件：调用对应的回调函数进行后续处理
         if (bits & MAIN_EVENT_WAKE_WORD_DETECTED) {
             OnWakeWordDetected();
         }
 
+        // 处理VAD（语音活动检测）状态变化事件：当设备处于监听状态时更新LED指示灯的状态
         if (bits & MAIN_EVENT_VAD_CHANGE) {
             if (device_state_ == kDeviceStateListening) {
                 auto led = Board::GetInstance().GetLed();
@@ -588,6 +657,7 @@ void Application::MainEventLoop() {
             }
         }
 
+        // 处理任务调度事件：取出所有待执行的任务并在当前上下文中依次执行
         if (bits & MAIN_EVENT_SCHEDULE) {
             std::unique_lock<std::mutex> lock(mutex_);
             auto tasks = std::move(main_tasks_);
@@ -597,12 +667,13 @@ void Application::MainEventLoop() {
             }
         }
 
+        // 处理时钟滴答事件：更新状态栏显示，并每隔10秒打印一次堆内存统计信息用于调试
         if (bits & MAIN_EVENT_CLOCK_TICK) {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
         
-            // Print the debug info every 10 seconds
+            // 每10个时钟周期打印一次系统堆内存使用情况
             if (clock_ticks_ % 10 == 0) {
                 // SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
                 // SystemInfo::PrintTaskList();
