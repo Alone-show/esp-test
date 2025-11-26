@@ -432,8 +432,10 @@ void Application::Start() {
 
     // 根据OTA配置选择合适的通信协议，默认使用MQTT
     if (ota.HasMqttConfig()) {
+        ESP_LOGE(TAG, "Using MQTT protocol");
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota.HasWebsocketConfig()) {
+        ESP_LOGE(TAG, "Using WebsocketProtocol");
         protocol_ = std::make_unique<WebsocketProtocol>();
     } else {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");

@@ -92,6 +92,7 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
         language_ = "cn";
         models_ = esp_srmodel_init("model");
 #ifdef CONFIG_CUSTOM_WAKE_WORD
+        ESP_LOGE(TAG,"CONFIG_CUSTOM_WAKE_WORD %s",CONFIG_CUSTOM_WAKE_WORD);
         threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
         commands_.push_back({CONFIG_CUSTOM_WAKE_WORD, CONFIG_CUSTOM_WAKE_WORD_DISPLAY, "wake"});
 #endif
@@ -173,6 +174,9 @@ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
                 if (wake_word_detected_callback_) {
                     wake_word_detected_callback_(last_detected_wake_word_);
                 }
+            }
+            else if(command.action == "cmd"){
+
             }
         }
         multinet_->clean(multinet_model_data_);

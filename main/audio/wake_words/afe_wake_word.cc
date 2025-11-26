@@ -37,6 +37,7 @@ AfeWakeWord::~AfeWakeWord() {
 }
 
 bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
+    ESP_LOGI(TAG, "Initializing AFEwake word model");
     codec_ = codec;
     int ref_num = codec_->input_reference() ? 1 : 0;
 

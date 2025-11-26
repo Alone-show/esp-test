@@ -75,12 +75,27 @@ NoAudioCodecDuplex::NoAudioCodecDuplex(int input_sample_rate, int output_sample_
 }
 
 
+/**
+ * @brief 构造函数，用于初始化一个单工模式（无音频编解码器）的音频通道配置。
+ * 
+ * 此构造函数会分别创建两个独立的 I2S 通道：一个用于扬声器输出（TX），另一个用于麦克风输入（RX）。
+ * 每个通道都使用标准 I2S 配置，并根据传入的 GPIO 引脚进行硬件连接设置。
+ *
+ * @param[in] input_sample_rate   麦克风输入采样率（单位 Hz）
+ * @param[in] output_sample_rate  扬声器输出采样率（单位 Hz）
+ * @param[in] spk_bclk            扬声器 I2S BCLK（位时钟）引脚编号
+ * @param[in] spk_ws              扬声器 I2S WS（字选择/左右声道）引脚编号
+ * @param[in] spk_dout            扬声器 I2S DOUT（数据输出）引脚编号
+ * @param[in] mic_sck             麦克风 I2S SCK（串行时钟）引脚编号
+ * @param[in] mic_ws              麦克风 I2S WS（字选择）引脚编号
+ * @param[in] mic_din             麦克风 I2S DIN（数据输入）引脚编号
+ */
 NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sample_rate, gpio_num_t spk_bclk, gpio_num_t spk_ws, gpio_num_t spk_dout, gpio_num_t mic_sck, gpio_num_t mic_ws, gpio_num_t mic_din) {
     duplex_ = false;
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
 
-    // Create a new channel for speaker
+    // 创建用于扬声器输出的 I2S 发送通道
     i2s_chan_config_t chan_cfg = {
         .id = (i2s_port_t)0,
         .role = I2S_ROLE_MASTER,
@@ -92,6 +107,7 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
     };
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle_, nullptr));
 
+    // 配置扬声器使用的标准 I2S 参数，包括采样率、位宽和 GPIO 映射等
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
             .sample_rate_hz = (uint32_t)output_sample_rate_,
@@ -132,15 +148,18 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
     };
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle_, &std_cfg));
 
-    // Create a new channel for MIC
+    // 创建用于麦克风输入的 I2S 接收通道
     chan_cfg.id = (i2s_port_t)1;
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, nullptr, &rx_handle_));
+
+    // 修改配置以适配麦克风输入通道的参数
     std_cfg.clk_cfg.sample_rate_hz = (uint32_t)input_sample_rate_;
     std_cfg.gpio_cfg.bclk = mic_sck;
     std_cfg.gpio_cfg.ws = mic_ws;
     std_cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
     std_cfg.gpio_cfg.din = mic_din;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle_, &std_cfg));
+
     ESP_LOGI(TAG, "Simplex channels created");
 }
 
